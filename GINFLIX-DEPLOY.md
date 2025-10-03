@@ -1,193 +1,201 @@
-# Guide de déploiement Ginflix (Garage sur kind)
+# Déploiement complet de Ginflix sur kind
 
-Ce document décrit la version fonctionnelle fournie dans ce dépôt :
-
-1. Le contenu du manifeste Kubernetes `ginflix-manifest.yaml`.
-2. Les étapes pour créer un cluster kind et charger les images.
-3. Les vérifications à exécuter pour confirmer le bon fonctionnement.
+Ce document décrit en détail comment démarrer un cluster Kubernetes local avec kind, déployer toutes les ressources nécessaires à l'application Ginflix (MongoDB, Garage, backend, streamer et frontaux) et vérifier le bon fonctionnement de la plateforme. Toutes les instructions sont basées sur les fichiers fournis dans ce dépôt, principalement `kind-config.yaml` et `ginflix-manifests.yaml`.
 
 ---
 
-## 1. Anatomie de `ginflix-manifest.yaml`
+## 1. Prérequis
 
-Le fichier multi-document assemble toute la pile Ginflix. Chaque section `---` représente une ressource.
-
-### 1.1 Configuration partagée
-
-- **Namespace `ginflix`** : espace d’isolation.
-- **ConfigMap `ginflix-config`** : URLs internes/externes, URI Mongo, configuration Garage (endpoint `garage-service.ginflix.svc.cluster.local:3901`, bucket `ginflix-media`).
-- **Secret `ginflix-secrets`** : Access Key / Secret Key Garage (à régénérer pour un usage réel).
-
-### 1.2 Garage (S3-compatible)
-
-- **PVC `ginflix-garage-data`** : volume persistant de 20 Gi.
-- **ConfigMap `garage-config`** : fichier `garage.toml` avec bind des ports 3900/3901/3902 et secret RPC.
-- **Service `garage-service`** : expose RPC, API S3 et UI web à l’intérieur du cluster.
-- **Deployment `garage`** : image `dxflrs/garage:v0.9.4`, monte le PVC et le configmap, probes TCP.
-
-### 1.3 MongoDB
-
-- **Services `ginflix-mongo` (headless) et `ginflix-mongo-svc`** : découverte et accès standard.
-- **StatefulSet `ginflix-mongo`** : 1 replica (`mongo:6.0`), PVC de 10 Gi sur `/data/db`.
-
-### 1.4 Applications Ginflix
-
-- **Backend** : `Deployment` 3 réplicas + `HPA` (3→6), `Service` NodePort 30081.
-- **Streamer** : `Deployment` 3 réplicas + `HPA` (3→6), `Service` NodePort 30082.
-- **Frontend utilisateur** : `Deployment` 2 réplicas, `Service` NodePort 30080.
-- **Frontend admin** : `Deployment` 2 réplicas, `Service` NodePort 30083.
-
-Tous les pods consomment `ginflix-config` / `ginflix-secrets` pour accéder à MongoDB et Garage.
+- Docker installé et fonctionnel (utilisé par kind et pour charger les images Ginflix/ Garage).
+- kind et kubectl disponibles dans le PATH.
+- Les fichiers suivants présents dans le répertoire du projet :
+  - `ginflix-backend.tar`, `ginflix-streamer.tar`, `ginflix-frontend.tar`, `ginflix-frontend-admin.tar`
+  - `kind-config.yaml`
+  - `ginflix-manifests.yaml`
+- Aucun cluster kind actif portant le même nom (`ginflix`). Supprimez les clusters existants le cas échéant :
+  ```bash
+  kind get clusters
+  kind delete cluster --name ginflix  # si le cluster existe déjà
+  ```
 
 ---
 
-## 2. Préparer le cluster kind
+## 2. Procédure complète depuis zéro
 
-### 2.1 Prérequis
+> Toutes les commandes ci-dessous sont à lancer depuis la racine du projet (`/home/bnj/Kubernetes/project`).
 
-- Docker, kind, kubectl installés.
-- Archive `ginflix.zip` extraite (fichiers `ginflix-backend.tar`, `ginflix-streamer.tar`, `ginflix-frontend.tar`, `ginflix-frontend-admin.tar`).
-- Accès réseau pour télécharger l’image Garage.
-
-### 2.2 Créer le cluster
-
-```bash
-kind delete cluster --name kind 2>/dev/null || true
-kind create cluster --name kind --config kind-config.yaml
-```
-
-`kind-config.yaml` publie sur l’hôte les NodePorts 30080–30083.
-
-Contrôles rapides :
-
-```bash
-kubectl cluster-info --context kind-kind
-kubectl get nodes
-```
-
-### 2.3 Charger les images Ginflix dans kind
+### Étape 1 — Charger les images Docker fournies
 
 ```bash
 docker load -i ginflix-backend.tar
 docker load -i ginflix-streamer.tar
 docker load -i ginflix-frontend.tar
 docker load -i ginflix-frontend-admin.tar
-
-kind load docker-image ginflix-backend:latest --name kind
-kind load docker-image ginflix-streamer:latest --name kind
-kind load docker-image ginflix-frontend:latest --name kind
-kind load docker-image ginflix-frontend-admin:latest --name kind
+docker pull dxflrs/amd64_garage:v0.7.0-rc1    # image Garage utilisée par les manifestes
 ```
 
----
+### Étape 2 — Créer le cluster kind
 
-## 3. Déployer Ginflix + Garage
+Le fichier `kind-config.yaml` configure les NodePorts (30080-30083) pour exposer frontal, backend et streamer sur l’hôte.
 
-1. **Appliquer le manifeste**
+```bash
+kind create cluster --name ginflix --config kind-config.yaml
+```
 
+### Étape 3 — Pousser les images Ginflix dans le cluster kind
+
+```bash
+kind load docker-image --name ginflix ginflix-backend:latest
+kind load docker-image --name ginflix ginflix-streamer:latest
+kind load docker-image --name ginflix ginflix-frontend:latest
+kind load docker-image --name ginflix ginflix-frontend-admin:latest
+kind load docker-image --name ginflix dxflrs/amd64_garage:v0.7.0-rc1
+```
+
+### Étape 4 — Déployer les ressources Kubernetes
+
+```bash
+kubectl apply -f ginflix-manifests.yaml
+```
+
+Les éléments importants créés :
+- Namespace `ginflix`.
+- ConfigMap `ginflix-config` (variables d’environnement partagées : Mongo URI, backend/ streamer internes, endpoint Garage, désactivation auth).
+- Secret `ginflix-garage-credentials` (clé/secret S3).
+- StatefulSets `mongo` et `garage` avec PVC de 5 Gi.
+- Deployments `ginflix-backend`, `ginflix-streamer`, `ginflix-frontend`, `ginflix-frontend-admin`.
+- Services NodePort exposés :
+  - Front utilisateur : `http://localhost:30080`
+  - Backend : `http://localhost:30081`
+  - Streamer : `http://localhost:30082`
+  - Front admin : `http://localhost:30083`
+
+### Étape 5 — Initialiser MongoDB
+
+Mongo est déployé comme StatefulSet single-node. Activez le replica set `rs0` :
+
+```bash
+kubectl exec -n ginflix mongo-0 -- \
+  mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{ _id: 0, host: "mongo-0.mongo.ginflix.svc.cluster.local:27017" }]})'
+```
+
+### Étape 6 — Initialiser Garage (stockage S3 compatible)
+
+1. **Identifier le nœud Garage** :
    ```bash
-   kubectl apply -f ginflix-manifest.yaml
-   kubectl wait --for=condition=Ready pods --all -n ginflix --timeout=240s
+   kubectl exec -n ginflix garage-0 -- /garage status
+   ```
+   Notez l’identifiant hexadécimal retourné (ex. `dd336444c6e3f44f`).
+
+2. **Assigner une capacité et appliquer la topologie** :
+   ```bash
+   kubectl exec -n ginflix garage-0 -- /garage layout assign -z dc1 -c 1 <node_id>
+   kubectl exec -n ginflix garage-0 -- /garage layout apply --version 1
    ```
 
-2. **Initialiser Garage** (les pods attendent la clé `GK98caf7a206f7236efbaf7fbe / 5355…` définie dans le `Secret`)
-
+3. **Importer la paire de clefs S3 prévue par `ginflix-garage-credentials`** :
    ```bash
-   # Identifier l'ID du nœud (champ ID)
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml status
-
-   # Assigner la capacité (remplacez <ID>) puis appliquer la version proposée
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml layout assign -z dc1 -c 1TiB <ID>
-
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml layout show
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml layout apply --version X
-
-   # Importer la clé et préparer le bucket
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml key import --yes \
-     GK98caf7a206f7236efbaf7fbe \
-     5355b15d79ea2cf6a88f0c09462bfdbd41d6352bb238d5c97a398343dc39fefa
-
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml bucket create ginflix-media || true
-
-   kubectl exec -n ginflix deploy/garage -- \
-     /garage --config /etc/garage/garage.toml bucket allow ginflix-media \
-     --key GK98caf7a206f7236efbaf7fbe --read --write
+   kubectl exec -n ginflix garage-0 -- \
+     /garage key import -n ginflix-service \
+     f3d888dc088576d4cff37568 44569c5896eaa42f235f67bc
    ```
 
-   > En production, créez une nouvelle clé (`garage key create`), mettez à jour `ginflix-manifest.yaml`, réappliquez le manifeste et rejouez les commandes `bucket allow`.
+4. **Créer le bucket Ginflix et autoriser la clef** :
+   ```bash
+   kubectl exec -n ginflix garage-0 -- /garage bucket create ginflix
+   kubectl exec -n ginflix garage-0 -- \
+     /garage bucket allow ginflix \
+     --key f3d888dc088576d4cff37568 --read --write --owner
+   ```
+
+À l’issue de ces actions, le backend et le streamer peuvent lire/écrire dans Garage via l’endpoint `garage.ginflix.svc.cluster.local:3900`.
+
+### Étape 7 — Vérifications générales
+
+1. **Etat des pods**
+   ```bash
+   kubectl get pods -n ginflix
+   ```
+   Tous les pods doivent être `Running` avec `READY 1/1`.
+
+2. **Services et NodePorts**
+   ```bash
+   kubectl get svc -n ginflix
+   ```
+   Confirmer que les NodePorts `30080` à `30083` sont listés.
+
+3. **Disponibilité applicative**
+   ```bash
+   # Backend REST
+   curl http://localhost:30081/api/videos
+
+   # Front utilisateur / admin (réponse HTTP 200 attendue)
+   curl -I http://localhost:30080
+   curl -I http://localhost:30083
+
+   # Streamer (endpoint proxy Garage)
+   curl -I 'http://localhost:30082/stream?file=test'
+   ```
+
+4. **Garage**
+   ```bash
+   kubectl exec -n ginflix garage-0 -- /garage bucket list
+   kubectl exec -n ginflix garage-0 -- /garage key info f3d888dc088576d4cff37568
+   ```
+   Vous devez voir le bucket `ginflix` et la clef avec les droits `RWO`.
+
+### Étape 8 — Test d’un flux complet (optionnel)
+
+1. Ouvrez `http://localhost:30083`, importez une vidéo via l’interface admin. Le backend déclenche l’encodage et pousse les artefacts (thumbnail + HLS) dans Garage.
+2. Sur `http://localhost:30080`, la galerie doit afficher la vidéo avec une miniature (servie par le streamer via le NodePort 30082).
+3. Surveillez les logs pour diagnostiquer :
+   ```bash
+   kubectl logs -n ginflix deployment/ginflix-backend
+   kubectl logs -n ginflix deployment/ginflix-streamer
+   ```
 
 ---
 
-## 4. Vérifications et tests
+## 3. Détails du manifeste `ginflix-manifests.yaml`
 
-### 4.1 Etat des ressources
+### 3.1 Configuration partagée
+- `ginflix-config` fournit :
+  - `MONGO_URI` : `mongodb://mongo-0.mongo.ginflix.svc.cluster.local:27017/ginflix`
+  - `BACKEND_URL` / `STREAM_URL` : URLs internes des services (pour communication inter-pods).
+  - `GARAGE_ENDPOINT` : `garage.ginflix.svc.cluster.local:3900` (sans schéma, requis par le client Garage S3).
+  - `GARAGE_BUCKET`, `GARAGE_USE_SSL`, `AUTH_DISABLED`.
+- `ginflix-garage-credentials` : clefs S3 utilisées par backend/ streamer.
 
-```bash
-kubectl get pods -n ginflix
-kubectl get svc -n ginflix
-kubectl get pvc -n ginflix
-```
+### 3.2 Garage
+- `ConfigMap garage-config` embarque le fichier `garage.toml` (ports RPC/S3/Web et secret RPC).
+- `StatefulSet garage` : 1 réplique, PVC `ReadWriteOnce` de 5 Gi, init container BusyBox pour créer l’arborescence `/var/lib/garage`.
+- `Service garage` : ports 3900 (S3), 3901 (RPC), 3902 (mode site).
 
-### 4.2 Logs
+### 3.3 MongoDB
+- `StatefulSet mongo` : 1 réplique, image officielle `mongo:6.0`, arguments `--replSet rs0`.
+- `Service mongo` : headless (`clusterIP: None`) pour permettre `mongo-0.mongo.ginflix.svc.cluster.local`.
 
-```bash
-kubectl logs -n ginflix deployment/ginflix-backend
-kubectl logs -n ginflix deployment/ginflix-streamer
-kubectl logs -n ginflix deploy/garage
-```
+### 3.4 Backend et Streamer
+- Deployments à 3 réplicas.
+- Services NodePort (30081/30082) pour accès depuis l’hôte.
+- Variables d’environnement issues de la ConfigMap et du Secret.
 
-### 4.3 Tests fonctionnels
-
-```bash
-curl http://localhost:30081/api/videos   # renvoie [] tant qu'aucune vidéo n'est importée
-curl -I http://localhost:30080           # frontend utilisateur
-curl -I http://localhost:30082           # streamer
-```
-
-### 4.4 Diagnostics Garage
-
-```bash
-kubectl exec -n ginflix deploy/garage -- \
-  /garage --config /etc/garage/garage.toml layout show
-
-kubectl exec -n ginflix deploy/garage -- \
-  /garage --config /etc/garage/garage.toml bucket list
-```
-
-### 4.5 Accès
-
-- Frontend utilisateur : [http://localhost:30080](http://localhost:30080)
-- Frontend administrateur : [http://localhost:30083](http://localhost:30083)
-- API backend : [http://localhost:30081](http://localhost:30081)
-- Streamer : [http://localhost:30082](http://localhost:30082)
+### 3.5 Frontaux
+- `ginflix-frontend` (2 réplicas) et `ginflix-frontend-admin` (1 réplique) sont des containers NGINX.
+- NodePorts 30080 et 30083 exposés.
+- Les variables `BACKEND_URL` et `STREAM_URL` sont surchargées côté déploiement pour pointer vers `http://localhost:30081` et `http://localhost:30082`, garantissant que les appels depuis le navigateur passent par les NodePorts publisés par kind.
 
 ---
 
-## 5. Maintenance / nettoyage
+## 4. Dépannage rapide
 
-- **Redémarrer un composant**
-
-  ```bash
-  kubectl rollout restart deployment/ginflix-backend -n ginflix
-  kubectl rollout restart deployment/ginflix-streamer -n ginflix
-  kubectl rollout restart deploy/garage -n ginflix
-  ```
-
-- **Supprimer entièrement l’environnement**
-
-  ```bash
-  kubectl delete namespace ginflix
-  kind delete cluster --name kind
-  ```
-
-> Supprimer le namespace efface aussi le PVC `ginflix-garage-data`. Lors d’un redeploiement, rejouez l’étape d’initialisation Garage (section 3.2).
+| Symptôme | Diagnostic | Correctif |
+| --- | --- | --- |
+| Front affiche "NetworkError" | Les frontaux appellent une URL interne `*.svc.cluster.local` inaccessible depuis le navigateur. | Vérifier que les déploiements front injectent bien `BACKEND_URL=http://localhost:30081` et `STREAM_URL=http://localhost:30082` (`kubectl exec ... -- printenv`). |
+| Erreur backend "Endpoint url cannot have fully qualified paths" | `GARAGE_ENDPOINT` contient un schéma (`http://...`). | Confirmer que `ginflix-config` expose `garage.ginflix.svc.cluster.local:3900`, redéployer le ConfigMap et redémarrer les pods backend/ streamer. |
+| Garage inaccessible | Layout non appliqué ou clef/bucket non créés. | Rejouer les commandes d’assignation (`/garage layout assign/apply`) puis l’import de la clef et la création du bucket. |
+| Pods bloqués en `ImagePullBackOff` | Images non disponibles dans le cluster kind. | Refaire les commandes `kind load docker-image --name ginflix <image:tag>`. |
 
 ---
 
-Avec ces étapes, la plateforme Ginflix (MongoDB + Garage + services applicatifs) est opérationnelle sur un cluster kind local.
+En suivant ce guide, vous disposez d’un environnement Ginflix complet, fonctionnel et reproductible sur un cluster kind local. Pensez à supprimer le cluster (`kind delete cluster --name ginflix`) une fois vos tests terminés pour libérer les ressources.

@@ -1,0 +1,362 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ginflix
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ginflix-config
+  namespace: ginflix
+data:
+  MONGO_URI: mongodb://mongo-0.mongo.ginflix.svc.cluster.local:27017/ginflix
+  BACKEND_URL: http://ginflix-backend.ginflix.svc.cluster.local:8080
+  STREAM_URL: http://ginflix-streamer.ginflix.svc.cluster.local:8080
+  GARAGE_ENDPOINT: garage.ginflix.svc.cluster.local:3900
+  GARAGE_BUCKET: ginflix
+  GARAGE_USE_SSL: "false"
+  AUTH_DISABLED: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ginflix-garage-credentials
+  namespace: ginflix
+type: Opaque
+stringData:
+  GARAGE_ACCESS_KEY: f3d888dc088576d4cff37568
+  GARAGE_SECRET_KEY: 44569c5896eaa42f235f67bc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  namespace: ginflix
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    replication_mode = "1"
+
+    rpc_bind_addr = "0.0.0.0:3901"
+    rpc_secret = "b506750807b7343af9ba63b120e51d8f920e1fbf21ec36880be35624945f30e5"
+    bootstrap_peers = []
+
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "0.0.0.0:3900"
+    root_domain = ".s3.ginflix.local"
+
+    [s3_web]
+    bind_addr = "0.0.0.0:3902"
+    root_domain = ".web.ginflix.local"
+    index = "index.html"
+
+    [admin]
+    api_bind_addr = "0.0.0.0:3903"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+  namespace: ginflix
+spec:
+  selector:
+    app: garage
+  ports:
+    - name: s3
+      port: 3900
+      targetPort: 3900
+    - name: rpc
+      port: 3901
+      targetPort: 3901
+    - name: web
+      port: 3902
+      targetPort: 3902
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: garage
+  namespace: ginflix
+spec:
+  serviceName: garage
+  replicas: 1
+  selector:
+    matchLabels:
+      app: garage
+  template:
+    metadata:
+      labels:
+        app: garage
+    spec:
+      initContainers:
+        - name: init-garage-dirs
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - mkdir -p /var/lib/garage/meta /var/lib/garage/data
+          volumeMounts:
+            - name: garage-data
+              mountPath: /var/lib/garage
+      containers:
+        - name: garage
+          image: dxflrs/amd64_garage:v0.7.0-rc1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: s3
+              containerPort: 3900
+            - name: rpc
+              containerPort: 3901
+            - name: web
+              containerPort: 3902
+          volumeMounts:
+            - name: garage-config
+              mountPath: /etc/garage.toml
+              subPath: garage.toml
+            - name: garage-data
+              mountPath: /var/lib/garage
+      volumes:
+        - name: garage-config
+          configMap:
+            name: garage-config
+  volumeClaimTemplates:
+    - metadata:
+        name: garage-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  namespace: ginflix
+  labels:
+    app: mongo
+spec:
+  clusterIP: None
+  selector:
+    app: mongo
+  ports:
+    - port: 27017
+      targetPort: 27017
+      name: mongodb
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  namespace: ginflix
+spec:
+  serviceName: mongo
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      containers:
+        - name: mongo
+          image: mongo:6.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 27017
+              name: mongodb
+          args:
+            - --replSet
+            - rs0
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: mongo-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ginflix-backend
+  namespace: ginflix
+spec:
+  type: NodePort
+  selector:
+    app: ginflix-backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30081
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-backend
+  namespace: ginflix
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ginflix-backend
+  template:
+    metadata:
+      labels:
+        app: ginflix-backend
+    spec:
+      containers:
+        - name: backend
+          image: ginflix-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+            - secretRef:
+                name: ginflix-garage-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ginflix-streamer
+  namespace: ginflix
+spec:
+  type: NodePort
+  selector:
+    app: ginflix-streamer
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30082
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-streamer
+  namespace: ginflix
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ginflix-streamer
+  template:
+    metadata:
+      labels:
+        app: ginflix-streamer
+    spec:
+      containers:
+        - name: streamer
+          image: ginflix-streamer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+            - secretRef:
+                name: ginflix-garage-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ginflix-frontend
+  namespace: ginflix
+spec:
+  type: NodePort
+  selector:
+    app: ginflix-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-frontend
+  namespace: ginflix
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ginflix-frontend
+  template:
+    metadata:
+      labels:
+        app: ginflix-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ginflix-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_URL
+              value: http://localhost:30081
+            - name: STREAM_URL
+              value: http://localhost:30082
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ginflix-frontend-admin
+  namespace: ginflix
+spec:
+  type: NodePort
+  selector:
+    app: ginflix-frontend-admin
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30083
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-frontend-admin
+  namespace: ginflix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ginflix-frontend-admin
+  template:
+    metadata:
+      labels:
+        app: ginflix-frontend-admin
+    spec:
+      containers:
+        - name: frontend-admin
+          image: ginflix-frontend-admin:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_URL
+              value: http://localhost:30081
+            - name: STREAM_URL
+              value: http://localhost:30082
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+            - secretRef:
+                name: ginflix-garage-credentials
