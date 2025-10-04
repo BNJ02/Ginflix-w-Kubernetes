@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-backend
+  namespace: ginflix
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ginflix-backend
+  template:
+    metadata:
+      labels:
+        app: ginflix-backend
+    spec:
+      containers:
+        - name: backend
+          image: ginflix-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+            - secretRef:
+                name: ginflix-garage-credentials
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-streamer
+  namespace: ginflix
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ginflix-streamer
+  template:
+    metadata:
+      labels:
+        app: ginflix-streamer
+    spec:
+      containers:
+        - name: streamer
+          image: ginflix-streamer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+            - secretRef:
+                name: ginflix-garage-credentials
+          resources:
+            requests:
+              cpu: 150m
+              memory: 128Mi
+            limits:
+              cpu: 400m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-frontend
+  namespace: ginflix
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ginflix-frontend
+  template:
+    metadata:
+      labels:
+        app: ginflix-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ginflix-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_URL
+              value: http://localhost:30081
+            - name: STREAM_URL
+              value: http://localhost:30082
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ginflix-frontend-admin
+  namespace: ginflix
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ginflix-frontend-admin
+  template:
+    metadata:
+      labels:
+        app: ginflix-frontend-admin
+    spec:
+      containers:
+        - name: frontend-admin
+          image: ginflix-frontend-admin:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          env:
+            - name: BACKEND_URL
+              value: http://localhost:30081
+            - name: STREAM_URL
+              value: http://localhost:30082
+          envFrom:
+            - configMapRef:
+                name: ginflix-config
+            - secretRef:
+                name: ginflix-garage-credentials
+          resources:
+            requests:
+              cpu: 150m
+              memory: 128Mi
+            limits:
+              cpu: 400m
+              memory: 256Mi

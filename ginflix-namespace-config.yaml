@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ginflix
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ginflix-config
+  namespace: ginflix
+data:
+  MONGO_URI: mongodb://mongo-0.mongo.ginflix.svc.cluster.local:27017/ginflix
+  BACKEND_URL: http://ginflix-backend.ginflix.svc.cluster.local:8080
+  STREAM_URL: http://ginflix-streamer.ginflix.svc.cluster.local:8080
+  GARAGE_ENDPOINT: garage.ginflix.svc.cluster.local:3900
+  GARAGE_BUCKET: ginflix
+  GARAGE_USE_SSL: "false"
+  AUTH_DISABLED: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ginflix-garage-credentials
+  namespace: ginflix
+type: Opaque
+stringData:
+  GARAGE_ACCESS_KEY: f3d888dc088576d4cff37568
+  GARAGE_SECRET_KEY: 44569c5896eaa42f235f67bc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  namespace: ginflix
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    replication_mode = "1"
+
+    rpc_bind_addr = "0.0.0.0:3901"
+    rpc_secret = "b506750807b7343af9ba63b120e51d8f920e1fbf21ec36880be35624945f30e5"
+    bootstrap_peers = []
+
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "0.0.0.0:3900"
+    root_domain = ".s3.ginflix.local"
+
+    [s3_web]
+    bind_addr = "0.0.0.0:3902"
+    root_domain = ".web.ginflix.local"
+    index = "index.html"
+
+    [admin]
+    api_bind_addr = "0.0.0.0:3903"
