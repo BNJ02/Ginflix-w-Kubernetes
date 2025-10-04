@@ -1,6 +1,8 @@
 # Déploiement complet de Ginflix sur kind
 
-Ce document explique comment créer un cluster kind from scratch, déployer toute la stack Ginflix à l’aide de plusieurs manifestes spécialisés et vérifier son bon fonctionnement. Les sections suivantes reprennent également la structure de chaque manifeste pour favoriser la maintenance.
+Ce document explique comment créer un cluster kind from scratch, déployer toute la stack Ginflix à l’aide de plusieurs manifestes spécialisés et vérifier son bon fonctionnement. Les sections suivantes reprennent également la structure de chaque manifeste.
+
+![Aperçu du déploiement Ginflix](./ginflix.png)
 
 ---
 
@@ -19,16 +21,20 @@ Ce document explique comment créer un cluster kind from scratch, déployer tout
 - Aucun cluster kind existant nommé `ginflix`.
 
 > Nettoyage si besoin :
+>
 > ```bash
+> kubectl get namespace ginflix 
+> kubectl delete namespace ginflix --wait # uniquement si le namespace existe déjà
 > kind get clusters
 > kind delete cluster --name ginflix  # uniquement si le cluster existe déjà
 > ```
+>
 
 ---
 
 ## 2. Procédure complète depuis zéro
 
-Toutes les commandes ci-dessous sont à lancer depuis la racine du projet (`/home/bnj/Kubernetes/project`).
+Toutes les commandes ci-dessous sont à lancer depuis la racine de votre projet (par exemple pour moi : `/home/bnj/Kubernetes/project`).
 
 ### Étape 1 — Charger les images Docker locales
 
@@ -61,27 +67,47 @@ kind load docker-image --name ginflix dxflrs/amd64_garage:v0.7.0-rc1
 ### Étape 4 — Appliquer les manifestes dans l’ordre recommandé
 
 1. **Namespace, ConfigMaps et Secrets**
+
    ```bash
    kubectl apply -f ginflix-namespace-config.yaml
    ```
+
 2. **Services (ClusterIP & NodePort)**
+
    ```bash
    kubectl apply -f ginflix-services.yaml
    ```
+
 3. **StatefulSets (Garage & Mongo)**
+
    ```bash
    kubectl apply -f ginflix-statefulsets.yaml
    ```
+
 4. **Deployments (Backend, Streamer, Frontaux)**
+
    ```bash
    kubectl apply -f ginflix-deployments.yaml
    ```
+
 5. **Horizontal Pod Autoscalers**
+
    ```bash
    kubectl apply -f ginflix-hpa.yaml
    ```
 
 ### Étape 5 — Initialiser MongoDB (réplique `rs0`)
+
+---
+
+/!\ Attendre que le pod soit dans l'état 'Running et qu'il soit 'Ready' à 1/1 !
+Visible avec la commande :
+
+```bash
+kubectl get pods -n ginflix
+```
+
+---
 
 ```bash
 kubectl exec -n ginflix mongo-0 -- \
@@ -91,18 +117,22 @@ kubectl exec -n ginflix mongo-0 -- \
 ### Étape 6 — Initialiser Garage (stockage S3-compatible)
 
 1. **Identifier le nœud**
+
    ```bash
    kubectl exec -n ginflix garage-0 -- /garage status
    ```
+
    Notez l’identifiant hexadécimal (ex. `dd336444c6e3f44f`).
 
 2. **Affecter la capacité et appliquer la topologie**
+
    ```bash
    kubectl exec -n ginflix garage-0 -- /garage layout assign -z dc1 -c 1 <node_id>
    kubectl exec -n ginflix garage-0 -- /garage layout apply --version 1
    ```
 
 3. **Importer la paire de clefs prévue**
+
    ```bash
    kubectl exec -n ginflix garage-0 -- \
      /garage key import -n ginflix-service \
@@ -110,6 +140,7 @@ kubectl exec -n ginflix mongo-0 -- \
    ```
 
 4. **Créer le bucket Ginflix et donner les droits à la clef**
+
    ```bash
    kubectl exec -n ginflix garage-0 -- /garage bucket create ginflix
    kubectl exec -n ginflix garage-0 -- \
@@ -120,18 +151,23 @@ kubectl exec -n ginflix mongo-0 -- \
 ### Étape 7 — Vérifications essentielles
 
 - **Pods**
+
   ```bash
   kubectl get pods -n ginflix
   ```
+
   Tous doivent être `Running` (backend, streamer, frontaux, mongo, garage).
 
 - **Services et NodePorts**
+
   ```bash
   kubectl get svc -n ginflix
   ```
+
   Les NodePorts `30080` (front), `30081` (backend), `30082` (streamer), `30083` (front admin) doivent apparaître.
 
 - **Tests rapides**
+
   ```bash
   curl http://localhost:30081/api/videos
   curl -I http://localhost:30080
@@ -140,17 +176,20 @@ kubectl exec -n ginflix mongo-0 -- \
   ```
 
 - **Garage**
+
   ```bash
   kubectl exec -n ginflix garage-0 -- /garage bucket list
   kubectl exec -n ginflix garage-0 -- /garage key info f3d888dc088576d4cff37568
   ```
+
   Vérifiez la présence du bucket `ginflix` et des droits `RWO` pour la clef.
 
-### Étape 8 — Parcours fonctionnel (optionnel)
+### Étape 8 — Test fonctionnel
 
 1. Accédez à `http://localhost:30083`, uploadez une vidéo (le backend déclenche la conversion + l’upload Garage).
 2. Sur `http://localhost:30080`, la vidéo apparaît avec sa miniature (servie par le streamer via `http://localhost:30082`).
 3. Surveillez les logs si nécessaire :
+
    ```bash
    kubectl logs -n ginflix deployment/ginflix-backend
    kubectl logs -n ginflix deployment/ginflix-streamer
@@ -161,25 +200,30 @@ kubectl exec -n ginflix mongo-0 -- \
 ## 3. Structure des manifestes
 
 ### 3.1 `ginflix-namespace-config.yaml`
+
 - Crée le namespace `ginflix`.
 - ConfigMap `ginflix-config` (URI Mongo, URLs internes, endpoint Garage sans schéma, désactivation auth).
 - Secret `ginflix-garage-credentials` (clé/secret S3).
 - ConfigMap `garage-config` contenant `garage.toml` (ports RPC/S3/Web, secret RPC).
 
 ### 3.2 `ginflix-services.yaml`
+
 - Service `garage` (ports 3900/3901/3902).
 - Service headless `mongo` (`clusterIP: None`).
 - Services NodePort pour backend (30081), streamer (30082), front (30080), front admin (30083) afin d’exposer l’application via les `extraPortMappings` kind.
 
 ### 3.3 `ginflix-statefulsets.yaml`
+
 - StatefulSet `garage` : volume persistant de 5 Gi, init container BusyBox pour créer l’arborescence `/var/lib/garage`.
 - StatefulSet `mongo` : base Mongo 6.0 en mode replica set `rs0`, PVC de 5 Gi.
 
 ### 3.4 `ginflix-deployments.yaml`
-- Deployments backend et streamer (3 réplicas chacun) : le backend demande 300m CPU / 512Mi et peut monter à 1 vCPU / 1Gi (pour encaisser ffmpeg), le streamer reste à 150m / 128Mi avec une limite à 400m / 256Mi. Les pods consomment ConfigMap + Secret pour Mongo et Garage.
+
+- Deployments backend et streamer (3 réplicas chacun) : le backend demande 300m CPU / 512Mi et peut monter à 4 vCPU / 2Gi (pour encaisser ffmpeg), le streamer reste à 150m / 128Mi avec une limite à 400m / 256Mi. Les pods consomment ConfigMap + Secret pour Mongo et Garage.
 - Deployments frontaux : URLs backend/streamer surchargées vers `http://localhost:30081` / `http://localhost:30082` pour contourner l’absence de DNS `*.svc` côté navigateur.
 
 ### 3.5 `ginflix-hpa.yaml`
+
 - Deux HPAs (`autoscaling/v2`) pour backend et streamer : min 3 pods, max 6, cible 60 % d’utilisation CPU. Ils reposent sur les requests définies dans les déploiements.
 
 ---
@@ -195,5 +239,3 @@ kubectl exec -n ginflix mongo-0 -- \
 | Pods en `ImagePullBackOff` | Images absentes des nœuds kind. | Refaire les commandes `kind load docker-image --name ginflix …`. |
 
 ---
-
-En suivant ce guide et la nouvelle segmentation des manifestes, vous disposez d’un déploiement Ginflix clair, modulaire et facilement maintenable sur un cluster kind local. Pensez à supprimer le cluster (`kind delete cluster --name ginflix`) après vos tests pour libérer les ressources Docker.
