@@ -43,7 +43,6 @@ docker load -i ginflix-backend.tar
 docker load -i ginflix-streamer.tar
 docker load -i ginflix-frontend.tar
 docker load -i ginflix-frontend-admin.tar
-docker pull dxflrs/amd64_garage:v0.7.0-rc1
 ```
 
 ### Étape 2 — Créer le cluster kind
@@ -61,7 +60,6 @@ kind load docker-image --name ginflix ginflix-backend:latest
 kind load docker-image --name ginflix ginflix-streamer:latest
 kind load docker-image --name ginflix ginflix-frontend:latest
 kind load docker-image --name ginflix ginflix-frontend-admin:latest
-kind load docker-image --name ginflix dxflrs/amd64_garage:v0.7.0-rc1
 ```
 
 ### Étape 4 — Appliquer les manifestes dans l’ordre recommandé
@@ -78,7 +76,7 @@ kind load docker-image --name ginflix dxflrs/amd64_garage:v0.7.0-rc1
    kubectl apply -f ginflix-services.yaml
    ```
 
-3. **StatefulSets (Garage & Mongo)**
+3. **StatefulSets (Mongo)**
 
    ```bash
    kubectl apply -f ginflix-statefulsets.yaml
@@ -96,59 +94,19 @@ kind load docker-image --name ginflix dxflrs/amd64_garage:v0.7.0-rc1
    kubectl apply -f ginflix-hpa.yaml
    ```
 
-### Étape 5 — Initialiser MongoDB (réplique `rs0`)
+### Étape 5 — Vérifier MongoDB (réplique `rs0`)
 
----
+- Attendez que le pod `mongo-0` soit `Running` et `Ready` (`kubectl get pods -n ginflix`).
+- Le StatefulSet déclenche automatiquement `rs.initiate(...)` au démarrage. Pour confirmer :
 
-/!\ Attendre que le pod soit dans l'état 'Running et qu'il soit 'Ready' à 1/1 !
-Visible avec la commande :
+  ```bash
+  kubectl exec -n ginflix mongo-0 -- \
+    mongosh --quiet --eval 'rs.status().ok'
+  ```
 
-```bash
-kubectl get pods -n ginflix
-```
+  La commande doit renvoyer `1`.
 
----
-
-```bash
-kubectl exec -n ginflix mongo-0 -- \
-  mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{ _id: 0, host: "mongo-0.mongo.ginflix.svc.cluster.local:27017" }]})'
-```
-
-### Étape 6 — Initialiser Garage (stockage S3-compatible)
-
-1. **Identifier le nœud**
-
-   ```bash
-   kubectl exec -n ginflix garage-0 -- /garage status
-   ```
-
-   Notez l’identifiant hexadécimal (ex. `dd336444c6e3f44f`).
-
-2. **Affecter la capacité et appliquer la topologie**
-
-   ```bash
-   kubectl exec -n ginflix garage-0 -- /garage layout assign -z dc1 -c 1 <node_id>
-   kubectl exec -n ginflix garage-0 -- /garage layout apply --version 1
-   ```
-
-3. **Importer la paire de clefs prévue**
-
-   ```bash
-   kubectl exec -n ginflix garage-0 -- \
-     /garage key import -n ginflix-service \
-     f3d888dc088576d4cff37568 44569c5896eaa42f235f67bc
-   ```
-
-4. **Créer le bucket Ginflix et donner les droits à la clef**
-
-   ```bash
-   kubectl exec -n ginflix garage-0 -- /garage bucket create ginflix
-   kubectl exec -n ginflix garage-0 -- \
-     /garage bucket allow ginflix \
-     --key f3d888dc088576d4cff37568 --read --write --owner
-   ```
-
-### Étape 7 — Vérifications essentielles
+### Étape 6 — Vérifications essentielles
 
 - **Pods**
 
@@ -156,7 +114,7 @@ kubectl exec -n ginflix mongo-0 -- \
   kubectl get pods -n ginflix
   ```
 
-  Tous doivent être `Running` (backend, streamer, frontaux, mongo, garage).
+  Tous doivent être `Running` (backend, streamer, frontaux, mongo).
 
 - **Services et NodePorts**
 
@@ -175,18 +133,9 @@ kubectl exec -n ginflix mongo-0 -- \
   curl -I 'http://localhost:30082/stream?file=test'
   ```
 
-- **Garage**
-
-  ```bash
-  kubectl exec -n ginflix garage-0 -- /garage bucket list
-  kubectl exec -n ginflix garage-0 -- /garage key info f3d888dc088576d4cff37568
-  ```
-
-  Vérifiez la présence du bucket `ginflix` et des droits `RWO` pour la clef.
-
 ### Étape 8 — Test fonctionnel
 
-1. Accédez à `http://localhost:30083`, uploadez une vidéo (le backend déclenche la conversion + l’upload Garage).
+1. Accédez à `http://localhost:30083`, uploadez une vidéo (le backend déclenche la conversion puis l’upload vers votre stockage Garage/S3 externe).
 2. Sur `http://localhost:30080`, la vidéo apparaît avec sa miniature (servie par le streamer via `http://localhost:30082`).
 3. Surveillez les logs si nécessaire :
 
@@ -202,20 +151,17 @@ kubectl exec -n ginflix mongo-0 -- \
 ### 3.1 `ginflix-namespace-config.yaml`
 
 - Crée le namespace `ginflix`.
-- ConfigMap `ginflix-config` (URI Mongo, URLs internes, endpoint Garage sans schéma, désactivation auth).
+- ConfigMap `ginflix-config` (URI Mongo, endpoint Garage externe avec SSL désactivé par défaut — passez `GARAGE_USE_SSL` à `"true"` si votre endpoint accepte HTTPS, désactivation auth).
 - Secret `ginflix-garage-credentials` (clé/secret S3).
-- ConfigMap `garage-config` contenant `garage.toml` (ports RPC/S3/Web, secret RPC).
 
 ### 3.2 `ginflix-services.yaml`
 
-- Service `garage` (ports 3900/3901/3902).
 - Service headless `mongo` (`clusterIP: None`).
 - Services NodePort pour backend (30081), streamer (30082), front (30080), front admin (30083) afin d’exposer l’application via les `extraPortMappings` kind.
 
 ### 3.3 `ginflix-statefulsets.yaml`
 
-- StatefulSet `garage` : volume persistant de 5 Gi, init container BusyBox pour créer l’arborescence `/var/lib/garage`.
-- StatefulSet `mongo` : base Mongo 6.0 en mode replica set `rs0`, PVC de 5 Gi.
+- StatefulSet `mongo` : base Mongo 6.0 en mode replica set `rs0`, PVC de 5 Gi, initialisation automatique du replica set via un hook `postStart`.
 
 ### 3.4 `ginflix-deployments.yaml`
 
@@ -232,8 +178,8 @@ kubectl exec -n ginflix mongo-0 -- \
 
 | Symptôme | Diagnostic | Correctif |
 | --- | --- | --- |
-| Front affiche « NetworkError » | Les scripts front appellent encore une URL interne `*.svc`. | Confirmez que les deployments frontaux exposent `BACKEND_URL` et `STREAM_URL` sur `http://localhost:30081/30082` (`kubectl exec … -- printenv`). |
-| Erreur backend « Endpoint url cannot have fully qualified paths » | `GARAGE_ENDPOINT` contient un schéma (`http://…`). | Ré-appliquez `ginflix-namespace-config.yaml`, puis redémarrez backend & streamer pour prendre en compte `garage.ginflix.svc.cluster.local:3900`. |
+| Front affiche « NetworkError » | Les scripts front consomment un backend injoignable (ex. URL interne `*.svc`). | Vérifiez les variables d'environnement des pods frontaux (`kubectl exec … -- printenv BACKEND_URL`) : elles doivent pointer vers `http://localhost:30081` / `http://localhost:30082`. |
+| Erreur backend « Endpoint url cannot have fully qualified paths » | `GARAGE_ENDPOINT` contient un schéma (`http://…`). | Supprimez le schéma (`http://`/`https://`) dans la ConfigMap et réappliquez `ginflix-namespace-config.yaml`, puis redémarrez backend & streamer. |
 | HPA ne scale pas | Pas de metrics server ou requests CPU manquantes. | Installez metrics-server sur kind et conservez les `requests` définies dans `ginflix-deployments.yaml`. |
 | Backend redémarre (OOMKilled) | La conversion ffmpeg dépasse 512Mi. | Les manifestes fixent désormais la limite à 1Gi (backend). Réappliquez `ginflix-deployments.yaml`. |
 | Pods en `ImagePullBackOff` | Images absentes des nœuds kind. | Refaire les commandes `kind load docker-image --name ginflix …`. |
