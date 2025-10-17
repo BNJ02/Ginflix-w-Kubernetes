@@ -21,31 +21,9 @@ spec:
           ports:
             - containerPort: 27017
               name: mongodb
-          args:
-            - --replSet
-            - rs0
           volumeMounts:
             - name: mongo-data
               mountPath: /data/db
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/sh
-                  - -c
-                  - |
-                    until mongosh --quiet --eval "db.adminCommand('ping')" >/dev/null 2>&1; do
-                      sleep 2
-                    done
-                    mongosh --quiet <<'EOF'
-                    try {
-                      rs.status();
-                    } catch (err) {
-                      if (err.code === 94 || err.codeName === 'NotYetInitialized') {
-                        rs.initiate({_id: "rs0", members: [{ _id: 0, host: "mongo-0.mongo.ginflix.svc.cluster.local:27017" }]});
-                      }
-                    }
-                    EOF
   volumeClaimTemplates:
     - metadata:
         name: mongo-data
@@ -53,4 +31,4 @@ spec:
         accessModes: ["ReadWriteOnce"]
         resources:
           requests:
-            storage: 5Gi
+            storage: 1Gi
