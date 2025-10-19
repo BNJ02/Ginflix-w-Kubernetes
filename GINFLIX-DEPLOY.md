@@ -94,19 +94,7 @@ kind load docker-image --name ginflix ginflix-frontend-admin:latest
    kubectl apply -f ginflix-hpa.yaml
    ```
 
-### Étape 5 — Vérifier MongoDB (réplique `rs0`)
-
-- Attendez que le pod `mongo-0` soit `Running` et `Ready` (`kubectl get pods -n ginflix`).
-- Le StatefulSet déclenche automatiquement `rs.initiate(...)` au démarrage. Pour confirmer :
-
-  ```bash
-  kubectl exec -n ginflix mongo-0 -- \
-    mongosh --quiet --eval 'rs.status().ok'
-  ```
-
-  La commande doit renvoyer `1`.
-
-### Étape 6 — Vérifications essentielles
+### Étape 5 — Vérifications essentielles
 
 - **Pods**
 
@@ -133,9 +121,9 @@ kind load docker-image --name ginflix ginflix-frontend-admin:latest
   curl -I 'http://localhost:30082/stream?file=test'
   ```
 
-### Étape 8 — Test fonctionnel
+### Étape 6 — Test fonctionnel
 
-1. Accédez à `http://localhost:30083`, uploadez une vidéo (le backend déclenche la conversion puis l’upload vers votre stockage Garage/S3 externe).
+1. Accédez à `http://localhost:30083`, uploadez une vidéo (le backend déclenche la conversion puis l’upload vers votre stockage Garage/S3 externe, de Télécom Paris).
 2. Sur `http://localhost:30080`, la vidéo apparaît avec sa miniature (servie par le streamer via `http://localhost:30082`).
 3. Surveillez les logs si nécessaire :
 
